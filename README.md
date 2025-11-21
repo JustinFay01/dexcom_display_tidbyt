@@ -2,15 +2,25 @@
 
 A Tidbyt application that displays real-time continuous glucose monitor (CGM) data from Dexcom G7/G6 devices on your Tidbyt LED display.
 
+Inspired by [this Reddit post](https://www.reddit.com/r/dexcom/comments/1p0ibso/made_a_nixie_tube_display_for_my_blood_sugar/) about creating custom displays for blood sugar monitoring.
+
+## Disclaimer
+
+**The majority of this code was written with Claude (Anthropic's AI assistant) and has been reviewed and tested by JustinFay01, a professional Associate Software Developer at Vervint in Grand Rapids, MI.**
+
+This is an **unofficial** app not affiliated with Dexcom, Inc. Use at your own risk. Not intended for medical decisions.
+
 ## Features
 
 - 📊 Real-time glucose readings with trend arrows
 - 🌍 Multi-region support (US, International, Japan)
 - 🎨 Color-coded display based on glucose ranges
-- ⏱️ Shows time since last reading
+- ⏱️ Shows time since last reading with stale data detection
 - 🔄 Automatic session management with retry logic
 - 📝 Debug mode for troubleshooting
 - 💾 Intelligent caching to minimize API calls
+- 🧪 Unit tests for critical functions
+- 📏 Large, bold text display for easy reading
 
 ## Display Information
 
@@ -71,8 +81,8 @@ The app requires your Dexcom Share credentials and region:
 - **Password**: Your Dexcom Share password
 - **Region**: Select your server region:
   - United States (most common)
-  - Outside US (Europe, Canada, etc.)
-  - Japan
+  - Outside US (Europe, Canada, etc.) *I have not tested since I live in the US*
+  - Japan *I have not tested since I live in the US*
 
 ### Optional Settings
 - **Units**: mg/dL or mmol/L
@@ -84,19 +94,19 @@ The app requires your Dexcom Share credentials and region:
 ### Test Locally
 ```bash
 # Run with default settings
-pixlet render dexcom_g7_pydexcom.star
+pixlet render dexcom_display.star
 
 # Test with debug output
-pixlet render dexcom_g7_pydexcom.star debug=true
+pixlet render dexcom_display.star debug=true
 
 # Preview in browser
-pixlet serve dexcom_g7_pydexcom.star
+pixlet serve dexcom_display.star
 # Open http://localhost:8080
 ```
 
 ### Deploy to Tidbyt
 ```bash
-pixlet push --api-token YOUR_TOKEN YOUR_DEVICE_ID dexcom_g7_pydexcom.star
+pixlet push --api-token YOUR_TOKEN YOUR_DEVICE_ID dexcom_display.star
 ```
 
 ## Implementation Details
@@ -115,8 +125,8 @@ This app is modeled after the [pydexcom](https://github.com/gagebenne/pydexcom) 
 
 ### Caching Strategy
 - **Account ID**: 24 hours (rarely changes)
-- **Session ID**: 2 hours (Dexcom's typical session length)
-- **Glucose Data**: 5 minutes (balance freshness vs API calls)
+- **Session ID**: 1 hour (conservative to avoid expired sessions)
+- **Glucose Data**: 4 minutes (balance freshness vs API calls)
 
 ## Troubleshooting
 
@@ -138,7 +148,7 @@ This app is modeled after the [pydexcom](https://github.com/gagebenne/pydexcom) 
 
 4. **Enable debug mode**
    ```bash
-   pixlet render dexcom_g7_pydexcom.star debug=true
+   pixlet render dexcom_display.star debug=true
    ```
    Check console output for specific errors
 
@@ -148,9 +158,10 @@ This app is modeled after the [pydexcom](https://github.com/gagebenne/pydexcom) 
 |-------|-------|----------|
 | Auth failed | Wrong credentials | Check username/password |
 | No data available | No recent CGM readings | Check sensor is active |
-| Session expired | Normal after 2 hours | App auto-retries |
+| Session expired | Normal after 1 hour | App auto-retries |
 | 500 Server Error | Wrong region selected | Try different region |
 | Rate limited | Too many requests | Wait a few minutes |
+| Stale data | API returning old data | Fixed with 10-min window |
 
 ### Debug Output
 
@@ -164,13 +175,34 @@ Fetching glucose from: https://share2.dexcom.com/...
 Glucose response status: 200
 ```
 
-## Files
+## Project Structure
 
-- `dexcom_g7_pydexcom.star` - Main app (recommended)
-- `dexcom_g7.star` - Original simpler version
-- `dexcom_g7_oauth.star` - Version with OAuth placeholder
-- `authentication_ideas.md` - Authentication documentation
-- `http_guide.md` - HTTP module reference
+```
+dexcom/
+├── dexcom_display.star       # Main app
+├── tests/                     # Unit tests
+│   ├── test_conversions.star # mmol/L conversion tests
+│   ├── test_time_functions.star # Timestamp parsing tests
+│   └── run_tests.sh          # Test runner script
+└── README.md                 # This file
+```
+
+### Running Tests
+
+Tests are written in pure Starlark and can be run with starlark-go:
+
+```bash
+# Install starlark-go (one time)
+go install go.starlark.net/cmd/starlark@latest
+
+# Run all tests
+cd dexcom/tests
+./run_tests.sh
+
+# Or run individual tests
+starlark test_conversions.star
+starlark test_time_functions.star
+```
 
 ## Security Notes
 
@@ -184,8 +216,8 @@ Glucose response status: 200
 
 - Requires active Dexcom Share (not local CGM data)
 - ~5 minute delay from actual glucose reading
-- Depends on unofficial API (may break)
-- Maximum 24 hours of historical data
+- Depends on unofficial API (may break without notice)
+- Maximum 10-minute data window to prevent stale data
 - Updates minimum every 15 seconds on Tidbyt
 
 ## Contributing
@@ -199,8 +231,9 @@ This is an **unofficial** app not affiliated with Dexcom, Inc. Use at your own r
 ## Credits
 
 - Based on [pydexcom](https://github.com/gagebenne/pydexcom) by gagebenne
-- Inspired by the Nightscout project
-- Thanks to the diabetes tech community
+- Inspired by the Nightscout project and 
+- Thanks to the diabetes tech community for reverse engineering the API
+- [This Reddit post](https://www.reddit.com/r/dexcom/comments/1p0ibso/made_a_nixie_tube_display_for_my_blood_sugar/)
 
 ## License
 

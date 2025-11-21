@@ -4,11 +4,11 @@ Based on pydexcom implementation patterns
 Shows real-time glucose readings from Dexcom G7 CGM
 """
 
-load("render.star", "render")
-load("http.star", "http")
-load("schema.star", "schema")
 load("cache.star", "cache")
 load("encoding/json.star", "json")
+load("http.star", "http")
+load("render.star", "render")
+load("schema.star", "schema")
 load("time.star", "time")
 
 # Regional configuration - Based on pydexcom
@@ -42,8 +42,8 @@ HEADERS = {
 ACCOUNT_ID_CACHE_KEY = "dexcom_account_id"
 SESSION_CACHE_KEY = "dexcom_session"
 GLUCOSE_CACHE_KEY = "glucose_data"
-SESSION_CACHE_TTL = 7200  # 2 hours
-GLUCOSE_CACHE_TTL = 300   # 5 minutes
+SESSION_CACHE_TTL = 3600  # 1 hour - more conservative to avoid expired sessions
+GLUCOSE_CACHE_TTL = 240  # 4 minutes - slightly shorter for fresher data
 ACCOUNT_CACHE_TTL = 86400  # 24 hours
 
 # Glucose thresholds (mg/dL)
@@ -58,11 +58,11 @@ MAX_COUNT = 288
 
 # Colors for display
 COLORS = {
-    "normal": "#00FF00",   # Green
-    "low": "#FF0000",      # Red
-    "high": "#FFA500",     # Orange
-    "urgent": "#FF0000",   # Red
-    "stale": "#808080",    # Gray
+    "normal": "#00FF00",  # Green
+    "low": "#FF0000",  # Red
+    "high": "#FFA500",  # Orange
+    "urgent": "#FF0000",  # Red
+    "stale": "#808080",  # Gray
 }
 
 # Trend data - From pydexcom
@@ -80,20 +80,29 @@ TREND_DESCRIPTIONS = {
 }
 
 TREND_ARROWS = {
-    0: "",
-    1: "↑↑",   # DoubleUp
-    2: "↑",    # SingleUp
-    3: "↗",    # FortyFiveUp
-    4: "→",    # Flat
-    5: "↘",    # FortyFiveDown
-    6: "↓",    # SingleDown
-    7: "↓↓",   # DoubleDown
-    8: "?",    # NotComputable
-    9: "-",    # RateOutOfRange
+    "": "",
+    "DoubleUp": "↑↑",  # DoubleUp
+    "SingleUp": "↑",  # SingleUp
+    "FortyFiveUp": "↗",  # FortyFiveUp
+    "Flat": "→",  # Flat
+    "FortyFiveDown": "↘",  # FortyFiveDown
+    "SingleDown": "↓",  # SingleDown
+    "DoubleDown": "↓↓",  # DoubleDown
+    "NotComputable": "?",  # NotComputable
+    "RateOutOfRange": "-",  # RateOutOfRange
 }
 
 # Unit conversion - From pydexcom
 MMOL_L_CONVERSION_FACTOR = 0.0555
+
+def format_mmol(value):
+    """Format mmol/L value with one decimal place"""
+
+    # Multiply by 10, round, then divide by 10 to get 1 decimal place
+    value_times_10 = int(value * 10 + 0.5)  # Adding 0.5 for rounding
+    integer_part = value_times_10 // 10
+    decimal_part = value_times_10 % 10
+    return str(integer_part) + "." + str(decimal_part)
 
 def main(config):
     """Main function called by Tidbyt"""
@@ -131,7 +140,7 @@ def main(config):
     # Convert units if needed
     if units == "mmol/L":
         glucose_value = glucose_value * MMOL_L_CONVERSION_FACTOR
-        display_value = "%.1f" % glucose_value
+        display_value = format_mmol(glucose_value)
     else:
         display_value = str(int(glucose_value))
 
@@ -150,7 +159,6 @@ def main(config):
 
     # Get trend display
     trend_arrow = TREND_ARROWS.get(trend, "?")
-    trend_text = TREND_DESCRIPTIONS.get(trend, "") if show_trend_text else ""
 
     # Build display
     return render_glucose_display(
@@ -159,7 +167,6 @@ def main(config):
         units = units,
         age = age_text,
         color = color,
-        trend_text = trend_text,
     )
 
 def DexcomClient(username, password, region, debug = False):
@@ -181,23 +188,38 @@ def get_current_glucose_reading(client):
     if not session_id:
         return None
 
-    # Check cache first
-    cached_data = cache.get(GLUCOSE_CACHE_KEY)
-    if cached_data:
-        if client["debug"]:
-            print("Using cached glucose data")
-        return json.decode(cached_data)
+    # Create user-specific cache key
+    glucose_cache_key = GLUCOSE_CACHE_KEY + "_" + client["username"]
 
-    # Fetch glucose values
+    # Check cache first, but validate it's not too old
+    cached_data = cache.get(glucose_cache_key)
+    if cached_data:
+        cached_reading = json.decode(cached_data)
+
+        # Check if cached data is recent enough (within 4 minutes)
+        if cached_reading and cached_reading.get("DT"):
+            cache_age = get_data_age_minutes(cached_reading.get("DT", ""))
+
+            # Use cache if less than 4 minutes old (matches GLUCOSE_CACHE_TTL)
+            if cache_age < 4:
+                if client["debug"]:
+                    print("Using cached glucose data (age: %d min)" % cache_age)
+                return cached_reading
+            elif client["debug"]:
+                print("Cached data too old (%d min), fetching fresh" % cache_age)
+
+    # Fetch glucose values - request last 10 minutes to avoid stale data
+    # Requesting smaller time windows helps get fresher data
     url = client["base_url"] + DEXCOM_GLUCOSE_VALUES_ENDPOINT
     params = {
         "sessionId": session_id,
-        "minutes": str(MAX_MINUTES),
-        "maxCount": "1",
+        "minutes": "10",  # Only request last 10 minutes instead of 1440
+        "maxCount": "3",  # Get last 3 readings to ensure we have data
     }
 
     if client["debug"]:
-        print("Fetching glucose from: %s" % url)
+        print("Fetching fresh glucose from: %s" % url)
+        print("Session ID: %s..." % session_id[:10] if session_id else "None")
 
     response = http.get(
         url = url,
@@ -216,9 +238,11 @@ def get_current_glucose_reading(client):
             if client["debug"]:
                 print("Session expired, clearing cache and retrying...")
 
-            # Clear session cache and retry once
-            cache_key = SESSION_CACHE_KEY + "_" + client["username"]
-            cache.set(cache_key, "", ttl_seconds = 1)  # Clear by setting to empty with short TTL
+            # Clear both session and account cache and retry once
+            session_cache_key = SESSION_CACHE_KEY + "_" + client["username"]
+            account_cache_key = ACCOUNT_ID_CACHE_KEY + "_" + client["username"]
+            cache.set(session_cache_key, "", ttl_seconds = 1)  # Clear by setting to empty with short TTL
+            cache.set(account_cache_key, "", ttl_seconds = 1)  # Clear account too
 
             # Get new session and retry
             session_id = get_session_id(client)
@@ -233,13 +257,45 @@ def get_current_glucose_reading(client):
 
     # Parse response
     data = response.json()
+
+    # If no data in last 10 minutes, try a longer window (30 minutes)
+    if (not data or len(data) == 0) and params["minutes"] == "10":
+        if client["debug"]:
+            print("No data in last 10 min, trying 30 min window")
+        params["minutes"] = "30"
+        params["maxCount"] = "6"  # Get more readings
+        response = http.get(url = url, params = params, headers = HEADERS, ttl_seconds = 60)
+
+        if response.status_code == 200:
+            data = response.json()
+
     if not data or len(data) == 0:
+        if client["debug"]:
+            print("No glucose data returned from API")
         return None
 
-    # Cache the result
-    cache.set(GLUCOSE_CACHE_KEY, json.encode(data[0]), ttl_seconds = GLUCOSE_CACHE_TTL)
+    if client["debug"]:
+        print("Received %d readings from API" % len(data))
+        for i, reading in enumerate(data):
+            reading_time = reading.get("DT", "")
+            reading_age = get_data_age_minutes(reading_time) if reading_time else -1
+            print("  Reading %d: Value=%s, Age=%d min, Time=%s" % (i, reading.get("Value", "?"), reading_age, reading_time[:30] if reading_time else ""))
 
-    return data[0]
+    # Use the most recent reading (first in the array)
+    glucose_reading = data[0]
+
+    if client["debug"]:
+        reading_time = glucose_reading.get("DT", "")
+        reading_age = get_data_age_minutes(reading_time) if reading_time else -1
+        print("Using most recent: Value=%s, Age=%d min" % (glucose_reading.get("Value", "?"), reading_age))
+
+    # Cache the result with user-specific key
+    cache.set(glucose_cache_key, json.encode(glucose_reading), ttl_seconds = GLUCOSE_CACHE_TTL)
+
+    if client["debug"]:
+        print("Cached new glucose reading for %d seconds" % GLUCOSE_CACHE_TTL)
+
+    return glucose_reading
 
 def get_session_id(client):
     """Get session ID following pydexcom authentication pattern"""
@@ -400,7 +456,7 @@ def get_data_age_minutes(timestamp_str):
 
     return int(diff_minutes)
 
-def render_glucose_display(value, arrow, units, age, color, trend_text):
+def render_glucose_display(value, arrow, units, age, color):
     """Render the glucose display"""
 
     children = [
@@ -411,12 +467,12 @@ def render_glucose_display(value, arrow, units, age, color, trend_text):
             children = [
                 render.Text(
                     content = value,
-                    font = "6x13",
+                    font = "10x20",  # Much larger, bolder font for glucose value
                     color = color,
                 ),
                 render.Text(
                     content = " " + arrow,
-                    font = "6x13",
+                    font = "10x20",  # Larger font for arrow to match
                     color = color,
                 ),
             ],
@@ -428,21 +484,14 @@ def render_glucose_display(value, arrow, units, age, color, trend_text):
         ),
     ]
 
-    if trend_text:
-        children.append(
-            render.Text(
-                content = trend_text,
-                font = "CG-pixel-3x5-mono",
-                color = color,
-            )
-        )
-    elif age:
+    if age:
+        children.append(render.Box(height = 2))  # Add space before time
         children.append(
             render.Text(
                 content = age,
                 font = "CG-pixel-3x5-mono",
                 color = "#808080",
-            )
+            ),
         )
 
     return render.Root(
@@ -550,13 +599,6 @@ def get_schema():
                         value = "mmol/L",
                     ),
                 ],
-            ),
-            schema.Toggle(
-                id = "show_trend_text",
-                name = "Show Trend Text",
-                desc = "Show trend description instead of time",
-                icon = "arrowTrendUp",
-                default = False,
             ),
             schema.Toggle(
                 id = "debug",
